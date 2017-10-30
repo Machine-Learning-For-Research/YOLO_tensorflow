@@ -1,3 +1,4 @@
+# coding=utf-8
 import numpy as np
 import tensorflow as tf
 import cv2
@@ -27,8 +28,11 @@ class YOLO_TF:
     h_img = 480
 
     def __init__(self, argvs=[]):
+        # 解析命令行参数
         self.argv_parser(argvs)
+        # 构建网络结构
         self.build_networks()
+        # 检测图片(如果有)
         if self.fromfile is not None: self.detect_from_file(self.fromfile)
 
     def argv_parser(self, argvs):
@@ -76,31 +80,45 @@ class YOLO_TF:
         if self.disp_console: print "Loading complete!" + '\n'
 
     def conv_layer(self, idx, inputs, filters, size, stride):
+        """
+        padding => conv => leaky_rule
+        """
+        # 取出当前channel_num
         channels = inputs.get_shape()[3]
         weight = tf.Variable(tf.truncated_normal([size, size, int(channels), filters], stddev=0.1))
         biases = tf.Variable(tf.constant(0.1, shape=[filters]))
 
+        # 添加padding
         pad_size = size // 2
         pad_mat = np.array([[0, 0], [pad_size, pad_size], [pad_size, pad_size], [0, 0]])
         inputs_pad = tf.pad(inputs, pad_mat)
 
+        # 卷积
         conv = tf.nn.conv2d(inputs_pad, weight, strides=[1, stride, stride, 1], padding='VALID',
                             name=str(idx) + '_conv')
         conv_biased = tf.add(conv, biases, name=str(idx) + '_conv_biased')
         if self.disp_console: print '    Layer  %d : Type = Conv, Size = %d * %d, Stride = %d, Filters = %d, Input channels = %d' % (
-        idx, size, size, stride, filters, int(channels))
+            idx, size, size, stride, filters, int(channels))
+        # leaky_relu激活
         return tf.maximum(self.alpha * conv_biased, conv_biased, name=str(idx) + '_leaky_relu')
 
     def pooling_layer(self, idx, inputs, size, stride):
+        """
+        max_pooling
+        """
         if self.disp_console: print '    Layer  %d : Type = Pool, Size = %d * %d, Stride = %d' % (
-        idx, size, size, stride)
+            idx, size, size, stride)
         return tf.nn.max_pool(inputs, ksize=[1, size, size, 1], strides=[1, stride, stride, 1], padding='SAME',
                               name=str(idx) + '_pool')
 
     def fc_layer(self, idx, inputs, hiddens, flat=False, linear=False):
+        """
+        full connection
+        """
         input_shape = inputs.get_shape().as_list()
         if flat:
             dim = input_shape[1] * input_shape[2] * input_shape[3]
+            # 转置？
             inputs_transposed = tf.transpose(inputs, (0, 3, 1, 2))
             inputs_processed = tf.reshape(inputs_transposed, [-1, dim])
         else:
@@ -109,30 +127,44 @@ class YOLO_TF:
         weight = tf.Variable(tf.truncated_normal([dim, hiddens], stddev=0.1))
         biases = tf.Variable(tf.constant(0.1, shape=[hiddens]))
         if self.disp_console: print '    Layer  %d : Type = Full, Hidden = %d, Input dimension = %d, Flat = %d, Activation = %d' % (
-        idx, hiddens, int(dim), int(flat), 1 - int(linear))
+            idx, hiddens, int(dim), int(flat), 1 - int(linear))
+        # 线性则直接返回
         if linear: return tf.add(tf.matmul(inputs_processed, weight), biases, name=str(idx) + '_fc')
         ip = tf.add(tf.matmul(inputs_processed, weight), biases)
+        # 非线性则经过leaky_relu处理
         return tf.maximum(self.alpha * ip, ip, name=str(idx) + '_fc')
 
     def detect_from_cvmat(self, img):
+        # 开始计时
         s = time.time()
+        # 记录图片宽高
         self.h_img, self.w_img, _ = img.shape
+        # resize => BGR2RGB
         img_resized = cv2.resize(img, (448, 448))
         img_RGB = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+        # 构建成输入格式
         img_resized_np = np.asarray(img_RGB)
         inputs = np.zeros((1, 448, 448, 3), dtype='float32')
+        # 标准化处理
         inputs[0] = (img_resized_np / 255.0) * 2.0 - 1.0
+        # 构建模型字典
         in_dict = {self.x: inputs}
+        # 运行模型输出
         net_output = self.sess.run(self.fc_19, feed_dict=in_dict)
+        # 输出拦截操作
         self.result = self.interpret_output(net_output[0])
+        # 显示处理结果
         self.show_results(img, self.result)
+        # 结束计时, Log
         strtime = str(time.time() - s)
         if self.disp_console: print 'Elapsed time : ' + strtime + ' secs' + '\n'
 
     def detect_from_file(self, filename):
         if self.disp_console: print 'Detect from ' + filename
+        # 读取图片数据
         img = cv2.imread(filename)
         # img = misc.imread(filename)
+        # 开始检测
         self.detect_from_cvmat(img)
 
     def detect_from_crop_sample(self):
@@ -152,18 +184,30 @@ class YOLO_TF:
         self.show_results(self.boxes, img)
 
     def interpret_output(self, output):
+        """
+        输出拦截操作
+        """
+        # 初始化prob数据, 7 x 7: 表示分割格, 2: 表示表格的box上限数, 20: 类别数, 表示该box的置信度
         probs = np.zeros((7, 7, 2, 20))
-        class_probs = np.reshape(output[0:980], (7, 7, 20))
-        scales = np.reshape(output[980:1078], (7, 7, 2))
+        # 取出表格对应的类别概率
+        class_probs = np.reshape(output[0: 980], (7, 7, 20))
+        # 取出表格置信度confidence
+        scales = np.reshape(output[980: 1078], (7, 7, 2))
+        # 取出表格对应的box
         boxes = np.reshape(output[1078:], (7, 7, 2, 4))
+        # 构造偏移值
         offset = np.transpose(np.reshape(np.array([np.arange(7)] * 14), (2, 7, 7)), (1, 2, 0))
 
+        # 右移
         boxes[:, :, :, 0] += offset
+        # 下移
         boxes[:, :, :, 1] += np.transpose(offset, (1, 0, 2))
+        # 归一
         boxes[:, :, :, 0:2] = boxes[:, :, :, 0:2] / 7.0
         boxes[:, :, :, 2] = np.multiply(boxes[:, :, :, 2], boxes[:, :, :, 2])
         boxes[:, :, :, 3] = np.multiply(boxes[:, :, :, 3], boxes[:, :, :, 3])
 
+        # 反归一, 得到绝对坐标
         boxes[:, :, :, 0] *= self.w_img
         boxes[:, :, :, 1] *= self.h_img
         boxes[:, :, :, 2] *= self.w_img
@@ -171,39 +215,56 @@ class YOLO_TF:
 
         for i in range(2):
             for j in range(20):
+                # prob = class_prob * confidence
                 probs[:, :, i, j] = np.multiply(class_probs[:, :, j], scales[:, :, i])
 
+        # 构造过滤器, 过滤条件: prob > prob_threshold
         filter_mat_probs = np.array(probs >= self.threshold, dtype='bool')
+        # 转化为非零项索引值
         filter_mat_boxes = np.nonzero(filter_mat_probs)
+        # 根据索引值过滤
         boxes_filtered = boxes[filter_mat_boxes[0], filter_mat_boxes[1], filter_mat_boxes[2]]
+        # 根据过滤器过滤
         probs_filtered = probs[filter_mat_probs]
+        # 取出满足过滤条件的分类索引
         classes_num_filtered = np.argmax(filter_mat_probs, axis=3)[
             filter_mat_boxes[0], filter_mat_boxes[1], filter_mat_boxes[2]]
 
+        # 将数据index按照prob从大到小对进行排序
         argsort = np.array(np.argsort(probs_filtered))[::-1]
         boxes_filtered = boxes_filtered[argsort]
         probs_filtered = probs_filtered[argsort]
         classes_num_filtered = classes_num_filtered[argsort]
 
+        # NMS处理
         for i in range(len(boxes_filtered)):
+            # 跳过prob为0项, 因为boxes_filtered是按照prob降序排序的, 后面的不会大于0
             if probs_filtered[i] == 0: continue
+            # 比较当前的box与比它小的所有box
             for j in range(i + 1, len(boxes_filtered)):
+                # 做非极大值抑制处理
                 if self.iou(boxes_filtered[i], boxes_filtered[j]) > self.iou_threshold:
                     probs_filtered[j] = 0.0
 
+        # 构造过滤器, 过滤条件: prob > 0
         filter_iou = np.array(probs_filtered > 0.0, dtype='bool')
+        # 过滤数据
         boxes_filtered = boxes_filtered[filter_iou]
         probs_filtered = probs_filtered[filter_iou]
         classes_num_filtered = classes_num_filtered[filter_iou]
 
         result = []
         for i in range(len(boxes_filtered)):
+            # 整合结果数据(class、x、y、w、h、prob)
             result.append([self.classes[classes_num_filtered[i]], boxes_filtered[i][0], boxes_filtered[i][1],
                            boxes_filtered[i][2], boxes_filtered[i][3], probs_filtered[i]])
 
         return result
 
     def show_results(self, img, results):
+        """
+        显示处理结果
+        """
         img_cp = img.copy()
         if self.filewrite_txt:
             ftxt = open(self.tofile_txt, 'w')
@@ -216,10 +277,14 @@ class YOLO_TF:
                 y) + ',' + str(int(results[i][3])) + ',' + str(int(results[i][4])) + '], Confidence = ' + str(
                 results[i][5])
             if self.filewrite_img or self.imshow:
+                # 显示检测框
                 cv2.rectangle(img_cp, (x - w, y - h), (x + w, y + h), (0, 255, 0), 2)
+                # 显示输出Label框
                 cv2.rectangle(img_cp, (x - w, y - h - 20), (x + w, y - h), (125, 125, 125), -1)
+                # 显示输出Label
                 cv2.putText(img_cp, results[i][0] + ' : %.2f' % results[i][5], (x - w + 5, y - h - 7),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+            # 写入检测结果
             if self.filewrite_txt:
                 ftxt.write(results[i][0] + ',' + str(x) + ',' + str(y) + ',' + str(w) + ',' + str(h) + ',' + str(
                     results[i][5]) + '\n')
@@ -234,14 +299,23 @@ class YOLO_TF:
             ftxt.close()
 
     def iou(self, box1, box2):
+        """
+        计算两个bounding-box的iou
+        """
+        # 水平重叠 = min(右边界) - max(左边界)
         tb = min(box1[0] + 0.5 * box1[2], box2[0] + 0.5 * box2[2]) - max(box1[0] - 0.5 * box1[2],
                                                                          box2[0] - 0.5 * box2[2])
+        # 垂直重叠 = min(下边界) - max(上边界)
         lr = min(box1[1] + 0.5 * box1[3], box2[1] + 0.5 * box2[3]) - max(box1[1] - 0.5 * box1[3],
                                                                          box2[1] - 0.5 * box2[3])
         if tb < 0 or lr < 0:
+            # 水平或垂直未重叠时, 重叠面积为0
             intersection = 0
         else:
+            # 水平和垂直均重叠时, S(面积) = 水平重叠 * 垂直重叠
             intersection = tb * lr
+        # iou = S(重叠) / (S(box1) + S(box2) - S(重叠))
+        # iou ∈ [0, 1], 越大越好
         return intersection / (box1[2] * box1[3] + box2[2] * box2[3] - intersection)
 
     def training(self):  # TODO add training function!
