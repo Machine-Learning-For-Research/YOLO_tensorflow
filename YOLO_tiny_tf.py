@@ -315,7 +315,7 @@ class YOLO_TF:
             # 水平和垂直均重叠时, S(面积) = 水平重叠 * 垂直重叠
             intersection = tb * lr
         # iou = S(重叠) / (S(box1) + S(box2) - S(重叠))
-        # iou ∈ [0, 1], 越大越好
+        # iou ∈ [0, 1]
         return intersection / (box1[2] * box1[3] + box2[2] * box2[3] - intersection)
 
     def training(self):  # TODO add training function!
